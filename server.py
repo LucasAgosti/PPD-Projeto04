@@ -8,6 +8,7 @@ class ChatServer:
         self.port = port
         self.max_clients = max_clients
         self.clients = {}  # Dicionário para armazenar conexões de clientes e seus nomes de usuário
+        self.client_status = {}  # Novo dicionário para armazenar o status online/offline dos clientes
         self.private_chats = {}  # Dicionário para gerenciar conversas privadas
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -36,7 +37,6 @@ class ChatServer:
 
     def register_client(self, client):
         try:
-            #client.send(pickle.dumps("Digite seu nome de usuário:"))
             username = pickle.loads(client.recv(4096))
             with self.lock:
                 if username in self.clients.values():
@@ -44,6 +44,7 @@ class ChatServer:
                     client.close()
                     return
                 self.clients[client] = username
+                self.client_status[client] = True  # Inicialmente, todos os clientes estão online
             print(f"Usuário {username} conectado.")
             self.update_user_list()
             self.handle_client(client)
@@ -65,6 +66,7 @@ class ChatServer:
         finally:
             with self.lock:
                 username = self.clients.pop(client, None)
+                self.client_status.pop(client, None)
                 if username:
                     print(f"Usuário {username} desconectado.")
             client.close()
@@ -75,6 +77,10 @@ class ChatServer:
             self.start_private_chat(client, action_data['target_user'])
         elif action_data['action'] == 'send_private_message':
             self.send_private_message(client, action_data['message'], action_data['target_user'])
+        elif action_data['action'] == 'status_update':
+            with self.lock:
+                self.client_status[client] = action_data['status']
+            print(f"{self.clients[client]} mudou para {'online' if action_data['status'] else 'offline'}")
 
     def start_private_chat(self, client, target_user):
         with self.lock:
@@ -91,9 +97,9 @@ class ChatServer:
         chat_id = frozenset([self.clients[client], target_user])
         if chat_id in self.private_chats:
             client_a, client_b = self.private_chats[chat_id]
-            if client == client_a:
+            if client == client_a and self.client_status[client_b]:
                 client_b.send(pickle.dumps(f"{self.clients[client]} (privado): {message}"))
-            elif client == client_b:
+            elif client == client_b and self.client_status[client_a]:
                 client_a.send(pickle.dumps(f"{self.clients[client]} (privado): {message}"))
         else:
             client.send(pickle.dumps(f"Chat privado com {target_user} não encontrado."))

@@ -7,11 +7,11 @@ import pickle
 class ChatClient(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Chat Client')
         self.username = None
         self.client_socket = None
         self.connected = False
-        self.current_chat_user = None  # Novo atributo para armazenar o usuário com quem o cliente está conversando
+        self.current_chat_user = None  # Armazena o usuário com quem o cliente está conversando
+        self.is_online = True  # Novo atributo para armazenar o estado online/offline
         self.setup_chat_interface()
 
     def setup_chat_interface(self):
@@ -28,8 +28,31 @@ class ChatClient(tk.Tk):
         self.user_list.grid(row=0, column=2, rowspan=3, sticky="nsw")
         self.user_list.bind('<<ListboxSelect>>', self.on_user_select)
 
+        # Botão para alternar entre online e offline
+        self.toggle_button = tk.Button(self, text="Ficar Offline", command=self.toggle_online_status)
+        self.toggle_button.grid(row=3, column=0, columnspan=3, sticky="ew")
+
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
+
+    def toggle_online_status(self):
+        self.is_online = not self.is_online
+        if self.is_online:
+            self.toggle_button.config(text="Ficar Offline")
+            self.update_chat_log("Você está online.")
+            self.update_server_online_status(True)
+        else:
+            self.toggle_button.config(text="Ficar Online")
+            self.update_chat_log("Você está offline.")
+            self.update_server_online_status(False)
+
+    def update_server_online_status(self, status):
+        if self.connected:
+            try:
+                message = {"action": "status_update", "status": status}
+                self.client_socket.send(pickle.dumps(message))
+            except Exception as e:
+                print(f"Erro ao atualizar status: {e}")
 
     def connect_to_server(self, host='192.168.0.11', port=22226):
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -44,6 +67,7 @@ class ChatClient(tk.Tk):
     def request_username(self):
         self.username = simpledialog.askstring("Nome de Usuário", "Digite seu nome de usuário:")
         if self.username:
+            self.title(f"Perfil do {self.username}")  # Define o título da janela com o nome do cliente
             self.client_socket.send(pickle.dumps(self.username))
 
     def check_for_incoming_data(self):
@@ -66,7 +90,7 @@ class ChatClient(tk.Tk):
 
     def update_chat_log(self, message):
         self.chat_log.config(state='normal')
-        self.chat_log.insert(tk.END, message + '\n')
+        self.chat_log.insert(tk.END, message + '\n')  # Adicionando uma nova linha após cada mensagem
         self.chat_log.config(state='disabled')
         self.chat_log.see(tk.END)
 
@@ -89,6 +113,10 @@ class ChatClient(tk.Tk):
             self.update_chat_log(f"Iniciado chat privado com {target_user}")
 
     def send_chat_message(self):
+        if not self.is_online:
+            self.update_chat_log("Você está offline. Não é possível enviar mensagens.")
+            return
+
         message = self.chat_message.get()
         if message and self.current_chat_user:
             formatted_message = {'action': 'send_private_message', 'message': message, 'target_user': self.current_chat_user}
