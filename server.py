@@ -1,6 +1,8 @@
 import socket
 import threading
 import pickle
+import pika  # Biblioteca RabbitMQ
+import time
 
 
 class ChatServer:
@@ -17,9 +19,19 @@ class ChatServer:
         self.server_socket.listen()
         self.lock = threading.Lock()  # Lock para gerenciar o acesso às variáveis compartilhadas
 
-        # Adicionado: Servidor de mensagens offline
-        self.offline_server_host = '192.168.0.11'  # IP do servidor de mensagens offline
-        self.offline_server_port = 22227  # Porta do servidor de mensagens offline
+        # Conectar ao RabbitMQ
+        self.connect_rabbitmq()
+
+    def connect_rabbitmq(self):
+        """Tenta conectar ao RabbitMQ, com reconexão em caso de falha."""
+        try:
+            self.rabbitmq_connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+            self.rabbitmq_channel = self.rabbitmq_connection.channel()
+            print("Conexão com RabbitMQ estabelecida.")
+        except Exception as e:
+            print(f"Erro ao conectar ao RabbitMQ: {e}. Tentando novamente em 5 segundos...")
+            time.sleep(5)
+            self.connect_rabbitmq()
 
     def start(self):
         print(f"Servidor iniciado em {self.host}:{self.port}")
@@ -49,8 +61,11 @@ class ChatServer:
                     client.close()
                     return
                 self.clients[client] = username
-                self.client_status[client] = True  # Inicialmente, todos os clientes estão online
-            print(f"Usuário {username} conectado.")
+                self.client_status[username] = True  # Inicialmente, todos os clientes estão online
+
+                # Criar uma fila para o usuário no RabbitMQ, caso ela não exista ainda
+                self.rabbitmq_channel.queue_declare(queue=username, durable=True)
+            print(f"Usuário {username} conectado e fila de mensagens criada.")
             self.update_user_list()
             self.handle_client(client)
         except Exception as e:
@@ -59,12 +74,6 @@ class ChatServer:
 
     def handle_client(self, client):
         try:
-            username = self.clients[client]
-            # Verificar se o cliente tem mensagens pendentes ao se conectar
-            pending_messages = self.get_offline_messages(username)
-            if pending_messages:
-                for msg in pending_messages:
-                    client.send(pickle.dumps(msg))
             while True:
                 data = client.recv(4096)
                 if not data:
@@ -77,73 +86,109 @@ class ChatServer:
         finally:
             with self.lock:
                 username = self.clients.pop(client, None)
-                self.client_status.pop(client, None)
+                self.client_status.pop(username, None)
                 if username:
                     print(f"Usuário {username} desconectado.")
             client.close()
             self.update_user_list()
 
     def handle_action(self, action_data, client):
-        if action_data['action'] == 'start_private_chat':
-            self.start_private_chat(client, action_data['target_user'])
-        elif action_data['action'] == 'send_private_message':
-            self.send_private_message(client, action_data['message'], action_data['target_user'])
+        if action_data['action'] == 'send_private_message':
+            target_user = action_data['target_user']
+            message = action_data['message']
+
+            # Verificar se o destinatário está online
+            if self.client_status.get(target_user, False):
+                # Se o destinatário estiver online, enviar a mensagem diretamente
+                self.send_private_message(client, message, target_user)
+            else:
+                # Se o destinatário estiver offline, enviar a mensagem para a fila do RabbitMQ e confirmar ao remetente
+                self.send_message_to_queue(client, target_user, message)
+
         elif action_data['action'] == 'status_update':
             with self.lock:
-                self.client_status[client] = action_data['status']
+                self.client_status[self.clients[client]] = action_data['status']
             print(f"{self.clients[client]} mudou para {'online' if action_data['status'] else 'offline'}")
 
-    def start_private_chat(self, client, target_user):
-        with self.lock:
-            target_client = next((c for c, u in self.clients.items() if u == target_user), None)
-            if target_client:
-                chat_id = frozenset([self.clients[client], target_user])
-                self.private_chats[chat_id] = (client, target_client)
-                client.send(pickle.dumps(f"Iniciado chat privado com {target_user}."))
-                target_client.send(pickle.dumps(f"{self.clients[client]} iniciou um chat privado com você."))
-            else:
-                client.send(pickle.dumps(f"Usuário {target_user} não encontrado."))
+            # Se o cliente ficar online, buscar mensagens offline
+            if action_data['status']:
+                threading.Thread(target=self.retrieve_offline_messages, args=(self.clients[client],)).start()
 
     def send_private_message(self, client, message, target_user):
-        chat_id = frozenset([self.clients[client], target_user])
+        """Enviar mensagem diretamente para o cliente se estiver online."""
         target_client = next((c for c, u in self.clients.items() if u == target_user), None)
-
-        if chat_id in self.private_chats:
-            if not self.client_status.get(target_client, False):
-                # Se o cliente alvo estiver offline, envia a mensagem ao servidor de mensagens offline
-                self.send_to_offline_server(target_user, f"{self.clients[client]} (privado): {message}")
-                client.send(pickle.dumps(f"{target_user} está offline. Mensagem enviada para armazenamento."))
-            else:
-                # Envia a mensagem diretamente se o alvo estiver online
-                client_a, client_b = self.private_chats[chat_id]
-                if client == client_a and self.client_status[client_b]:
-                    client_b.send(pickle.dumps(f"{self.clients[client]} (privado): {message}"))
-                elif client == client_b and self.client_status[client_a]:
-                    client_a.send(pickle.dumps(f"{self.clients[client]} (privado): {message}"))
+        if target_client:
+            try:
+                # Enviar mensagem privada ao destinatário
+                target_client.send(pickle.dumps(f"{self.clients[client]} (privado): {message}"))
+                # Confirmar ao remetente que a mensagem foi enviada, mas sem duplicação
+                client.send(pickle.dumps(f"Você (privado): {message}"))
+            except Exception as e:
+                print(f"Erro ao enviar mensagem para {target_user}: {e}")
         else:
-            client.send(pickle.dumps(f"Chat privado com {target_user} não encontrado."))
+            print(f"Usuário {target_user} não encontrado online.")
 
-    def send_to_offline_server(self, target_user, message):
+    def send_message_to_queue(self, client, target_user, message):
+        """Enviar mensagem para a fila do destinatário no RabbitMQ e confirmar para o remetente."""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as offline_socket:
-                offline_socket.connect((self.offline_server_host, self.offline_server_port))
-                request = {'action': 'store_message', 'target_user': target_user, 'message': message}
-                offline_socket.send(pickle.dumps(request))
-        except Exception as e:
-            print(f"Erro ao enviar mensagem para o servidor offline: {e}")
+            # Verificar se a conexão está ativa
+            if self.rabbitmq_connection.is_closed:
+                print("Conexão com RabbitMQ perdida. Tentando reconectar...")
+                self.connect_rabbitmq()
 
-    def get_offline_messages(self, username):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as offline_socket:
-                offline_socket.connect((self.offline_server_host, self.offline_server_port))
-                request = {'action': 'get_messages', 'target_user': username}
-                offline_socket.send(pickle.dumps(request))
-                data = offline_socket.recv(4096)
-                messages = pickle.loads(data)
-                return messages
+            # Enviar mensagem para a fila do destinatário
+            self.rabbitmq_channel.basic_publish(
+                exchange='',
+                routing_key=target_user,
+                body=message,
+                properties=pika.BasicProperties(delivery_mode=2)  # Tornar mensagem persistente
+            )
+            print(f"Mensagem para {target_user} armazenada na fila RabbitMQ.")
+
+            # Confirmar ao remetente que a mensagem foi enviada
+            client.send(pickle.dumps(f"Você (privado): {message}"))
+
         except Exception as e:
-            print(f"Erro ao buscar mensagens offline: {e}")
-            return []
+            print(f"Erro ao enviar mensagem para a fila do RabbitMQ: {e}")
+            # Tentar reconectar ao RabbitMQ em caso de falha
+            self.connect_rabbitmq()
+
+    def retrieve_offline_messages(self, username):
+        """Buscar mensagens offline da fila do RabbitMQ e enviar ao cliente."""
+        try:
+            # Verificar se a conexão está ativa antes de consumir
+            if self.rabbitmq_connection.is_closed:
+                print("Conexão com RabbitMQ perdida. Tentando reconectar...")
+                self.connect_rabbitmq()
+
+            messages = []
+            while True:
+                method_frame, properties, body = self.rabbitmq_channel.basic_get(queue=username, auto_ack=False)
+                if method_frame:
+                    messages.append(body.decode())
+                    self.rabbitmq_channel.basic_ack(method_frame.delivery_tag)
+                else:
+                    break
+
+            if messages:
+                print(f"Entregando {len(messages)} mensagens offline para {username}")
+                # Enviar todas as mensagens offline como uma lista
+                self.send_private_message_direct(username, messages)
+
+        except Exception as e:
+            print(f"Erro ao consumir mensagens offline para {username}: {e}")
+            # Recriar a conexão RabbitMQ em caso de erro
+            self.connect_rabbitmq()
+
+    def send_private_message_direct(self, username, messages):
+        """Enviar lista de mensagens offline diretamente para o cliente."""
+        target_client = next((c for c, u in self.clients.items() if u == username), None)
+        if target_client:
+            try:
+                # Enviar a lista de mensagens como um objeto serializado
+                target_client.send(pickle.dumps(messages))
+            except Exception as e:
+                print(f"Erro ao enviar mensagens para {username}: {e}")
 
     def update_user_list(self):
         with self.lock:
@@ -160,6 +205,7 @@ class ChatServer:
             for client in self.clients.keys():
                 client.close()
             self.server_socket.close()
+            self.rabbitmq_connection.close()
 
 
 if __name__ == '__main__':

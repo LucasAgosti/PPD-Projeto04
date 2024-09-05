@@ -4,6 +4,7 @@ import socket
 import threading
 import pickle
 
+
 class ChatClient(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -11,7 +12,7 @@ class ChatClient(tk.Tk):
         self.client_socket = None
         self.connected = False
         self.current_chat_user = None  # Armazena o usuário com quem o cliente está conversando
-        self.is_online = True  # Novo atributo para armazenar o estado online/offline
+        self.is_online = True  # Atributo para armazenar o estado online/offline
         self.setup_chat_interface()
 
     def setup_chat_interface(self):
@@ -74,15 +75,25 @@ class ChatClient(tk.Tk):
         if self.connected:
             try:
                 self.client_socket.settimeout(0.1)
-                data = self.client_socket.recv(4096)
-                if data:
-                    message = pickle.loads(data)
-                    if isinstance(message, str):
-                        self.update_chat_log(message)
-                    elif isinstance(message, dict) and message['action'] == 'update_user_list':
-                        self.update_user_list(message['user_list'])
-            except socket.timeout:
-                pass
+                while True:  # Processar várias mensagens de uma vez
+                    try:
+                        data = self.client_socket.recv(4096)
+                        if data:
+                            messages = pickle.loads(data)
+
+                            # Verifica se é uma lista de mensagens
+                            if isinstance(messages, list):
+                                for message in messages:
+                                    self.update_chat_log(message)
+                            elif isinstance(messages, str):
+                                # Caso a mensagem seja uma string, exiba normalmente
+                                self.update_chat_log(messages)
+                            elif isinstance(messages, dict):
+                                # Se for um dict (como o update de lista de usuários)
+                                if 'user_list' in messages:
+                                    self.update_user_list(messages['user_list'])
+                    except socket.timeout:
+                        break
             except Exception as e:
                 print(f"Erro ao receber dados: {e}")
                 self.connected = False
@@ -119,9 +130,9 @@ class ChatClient(tk.Tk):
 
         message = self.chat_message.get()
         if message and self.current_chat_user:
-            formatted_message = {'action': 'send_private_message', 'message': message, 'target_user': self.current_chat_user}
+            formatted_message = {'action': 'send_private_message', 'message': message,
+                                 'target_user': self.current_chat_user}
             self.send_data_to_server(formatted_message)
-            self.update_chat_log(f"Você (privado): {message}")
             self.chat_message.delete(0, tk.END)
 
     def send_data_to_server(self, data):
@@ -132,6 +143,7 @@ class ChatClient(tk.Tk):
 
     def run(self):
         self.mainloop()
+
 
 if __name__ == "__main__":
     client = ChatClient()
