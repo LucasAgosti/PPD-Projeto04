@@ -98,6 +98,14 @@ class ChatServer:
             target_user = action_data['target_user']
             message = action_data['message']
 
+            # Verificar se o destinatário está na lista de contatos do remetente
+            username = self.clients[client]
+            if target_user not in self.contacts[username]:
+                client.send(pickle.dumps(
+                    f"Erro: Você não pode enviar mensagens para {target_user}, pois ele não está na sua lista de contatos."))
+                print(f"{username} tentou enviar mensagem para {target_user}, que não está na lista de contatos.")
+                return
+
             # Verificar se o destinatário está online
             if self.client_status.get(target_user, False):
                 # Se o destinatário estiver online, enviar a mensagem diretamente
@@ -197,14 +205,22 @@ class ChatServer:
             client.send(pickle.dumps(f"Contato {contact} não está na lista."))
 
     def send_private_message(self, client, message, target_user):
-        """Enviar mensagem diretamente para o cliente se estiver online."""
+        """Enviar mensagem diretamente para o cliente se estiver online e na lista de contatos."""
+        username = self.clients[client]
+
+        # Verificar se o destinatário está na lista de contatos do remetente
+        if target_user not in self.contacts[username]:
+            client.send(pickle.dumps(
+                f"Erro: Você não pode enviar mensagens para {target_user}, pois ele não está na sua lista de contatos."))
+            print(f"{username} tentou enviar mensagem para {target_user}, que não está na lista de contatos.")
+            return
+
         target_client = next((c for c, u in self.clients.items() if u == target_user), None)
         if target_client:
             try:
                 # Enviar mensagem privada ao destinatário
                 target_client.send(pickle.dumps(f"{self.clients[client]} (privado): {message}"))
-                # Confirmar ao remetente que a mensagem foi enviada, mas sem duplicação
-                #client.send(pickle.dumps(f"Você (privado): {message}"))
+                # Confirmar ao remetente que a mensagem foi enviada
                 client.send(pickle.dumps(f"Você para ({target_user}): {message}"))
             except Exception as e:
                 print(f"Erro ao enviar mensagem para {target_user}: {e}")
