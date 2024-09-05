@@ -4,7 +4,6 @@ import socket
 import threading
 import pickle
 
-
 class ChatClient(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -13,6 +12,7 @@ class ChatClient(tk.Tk):
         self.connected = False
         self.current_chat_user = None  # Armazena o usuário com quem o cliente está conversando
         self.is_online = True  # Atributo para armazenar o estado online/offline
+        self.contacts = []  # Lista de contatos
         self.setup_chat_interface()
 
     def setup_chat_interface(self):
@@ -29,12 +29,32 @@ class ChatClient(tk.Tk):
         self.user_list.grid(row=0, column=2, rowspan=3, sticky="nsw")
         self.user_list.bind('<<ListboxSelect>>', self.on_user_select)
 
+        # Botão para adicionar contato
+        add_contact_button = tk.Button(self, text="Adicionar Contato", command=self.add_contact)
+        add_contact_button.grid(row=3, column=0, sticky="ew")
+
+        # Botão para remover contato
+        remove_contact_button = tk.Button(self, text="Remover Contato", command=self.remove_contact)
+        remove_contact_button.grid(row=3, column=1, sticky="ew")
+
         # Botão para alternar entre online e offline
         self.toggle_button = tk.Button(self, text="Ficar Offline", command=self.toggle_online_status)
-        self.toggle_button.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self.toggle_button.grid(row=4, column=0, columnspan=2, sticky="ew")
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
+
+    def add_contact(self):
+        new_contact = simpledialog.askstring("Adicionar Contato", "Digite o nome do contato:")
+        if new_contact:
+            message = {'action': 'add_contact', 'contact': new_contact}
+            self.send_data_to_server(message)
+
+    def remove_contact(self):
+        selected_contact = simpledialog.askstring("Remover Contato", "Digite o nome do contato:")
+        if selected_contact:
+            message = {'action': 'remove_contact', 'contact': selected_contact}
+            self.send_data_to_server(message)
 
     def toggle_online_status(self):
         self.is_online = not self.is_online
@@ -75,23 +95,21 @@ class ChatClient(tk.Tk):
         if self.connected:
             try:
                 self.client_socket.settimeout(0.1)
-                while True:  # Processar várias mensagens de uma vez
+                while True:
                     try:
                         data = self.client_socket.recv(4096)
                         if data:
-                            messages = pickle.loads(data)
+                            message = pickle.loads(data)
 
-                            # Verifica se é uma lista de mensagens
-                            if isinstance(messages, list):
-                                for message in messages:
-                                    self.update_chat_log(message)
-                            elif isinstance(messages, str):
-                                # Caso a mensagem seja uma string, exiba normalmente
-                                self.update_chat_log(messages)
-                            elif isinstance(messages, dict):
-                                # Se for um dict (como o update de lista de usuários)
-                                if 'user_list' in messages:
-                                    self.update_user_list(messages['user_list'])
+                            if isinstance(message, list):
+                                # Se for uma lista de mensagens (offline), exibir todas as mensagens
+                                for msg in message:
+                                    self.update_chat_log(f"Mensagem offline: {msg}")
+                            elif isinstance(message, str):
+                                # Exibir a mensagem de erro ou sucesso no chat
+                                self.update_chat_log(message)
+                            elif isinstance(message, dict) and message['action'] == 'update_user_list':
+                                self.update_user_list(message['user_list'])
                     except socket.timeout:
                         break
             except Exception as e:
@@ -101,11 +119,12 @@ class ChatClient(tk.Tk):
 
     def update_chat_log(self, message):
         self.chat_log.config(state='normal')
-        self.chat_log.insert(tk.END, message + '\n')  # Adicionando uma nova linha após cada mensagem
+        self.chat_log.insert(tk.END, message + '\n')
         self.chat_log.config(state='disabled')
         self.chat_log.see(tk.END)
 
     def update_user_list(self, user_list):
+        self.contacts = user_list
         self.user_list.delete(0, tk.END)
         for user in user_list:
             if user != self.username:
@@ -130,8 +149,7 @@ class ChatClient(tk.Tk):
 
         message = self.chat_message.get()
         if message and self.current_chat_user:
-            formatted_message = {'action': 'send_private_message', 'message': message,
-                                 'target_user': self.current_chat_user}
+            formatted_message = {'action': 'send_private_message', 'message': message, 'target_user': self.current_chat_user}
             self.send_data_to_server(formatted_message)
             self.chat_message.delete(0, tk.END)
 
